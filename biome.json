@@ -1,0 +1,14 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "extends": ["ultracite"],
+  "linter": {
+    "rules": {
+      "style": { "useBlockStatements": "off", "noNegationElse": "off" },
+      "complexity": { "noVoid": "off" },
+      "suspicious": { "noConsoleLog": "off", "noConsole": "off" },
+      "a11y": {
+        "noAutofocus": "off"
+      }
+    }
+  }
+}
