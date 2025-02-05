@@ -13,7 +13,11 @@ const streamPlaylistRewrite = (
   targetUrl: string
 ) => {
   const originalUrl = new URL(targetUrl);
-  const baseUrl = `${originalUrl.origin}${originalUrl.pathname.substring(0, originalUrl.pathname.lastIndexOf('/'))}`;
+  const origin = originalUrl.origin;
+  const pathname = originalUrl.pathname.substring(
+    0,
+    originalUrl.pathname.lastIndexOf('/')
+  );
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
 
@@ -36,12 +40,27 @@ const streamPlaylistRewrite = (
         for (const line of lines) {
           const modifiedLine = line
             .replace(segmentRegexM, (segment) => {
-              const absoluteSegmentUrl = `${baseUrl}/${segment}`;
-              return `/hls?url=${encodeURIComponent(absoluteSegmentUrl)}`;
+              let segmentUrl = segment;
+
+              if (segment.startsWith('/')) {
+                segmentUrl = `${origin}/${segment}${originalUrl.search}`.trim();
+              } else {
+                segmentUrl =
+                  `${origin}${pathname}/${segment}${originalUrl.search}`.trim();
+              }
+
+              return `/hls?url=${encodeURIComponent(segmentUrl)}`;
             })
             .replace(segmentRegexTs, (segment) => {
-              const absoluteSegmentUrl = `${baseUrl}/${segment}`;
-              return `/hls?url=${encodeURIComponent(absoluteSegmentUrl)}`;
+              let segmentUrl = segment;
+
+              if (segment.startsWith('/')) {
+                segmentUrl = `${origin}/${segment}${originalUrl.search}`.trim();
+              } else {
+                segmentUrl =
+                  `${origin}${pathname}/${segment}${originalUrl.search}`.trim();
+              }
+              return `/hls?url=${encodeURIComponent(segmentUrl)}`;
             });
           controller.enqueue(encoder.encode(`${modifiedLine}\n`));
         }
