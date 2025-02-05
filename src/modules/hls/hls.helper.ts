@@ -37,11 +37,11 @@ const streamPlaylistRewrite = (
           const modifiedLine = line
             .replace(segmentRegexM, (segment) => {
               const absoluteSegmentUrl = `${baseUrl}/${segment}`;
-              return `/proxy/hls?url=${encodeURIComponent(absoluteSegmentUrl)}`;
+              return `/hls?url=${encodeURIComponent(absoluteSegmentUrl)}`;
             })
             .replace(segmentRegexTs, (segment) => {
               const absoluteSegmentUrl = `${baseUrl}/${segment}`;
-              return `/proxy/hls?url=${encodeURIComponent(absoluteSegmentUrl)}`;
+              return `/hls?url=${encodeURIComponent(absoluteSegmentUrl)}`;
             });
           controller.enqueue(encoder.encode(`${modifiedLine}\n`));
         }
