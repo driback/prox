@@ -1,4 +1,5 @@
 const regex = /mpegurl/i;
+const segmentRegex = /^(?!#)(.*\.(?:m3u8|ts))(\?[^#\r\n]+)?/gi;
 
 const createEmptyStream = (): ReadableStream<Uint8Array> => {
   return new ReadableStream<Uint8Array>({
@@ -21,9 +22,6 @@ const streamPlaylistRewrite = (
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
 
-  const segmentRegexM = /^(?!#)(.*\.m3u8)(\?[^#\r\n]+)?/gi;
-  const segmentRegexTs = /^(?!#)(.*\.ts)(\?[^#\r\n]+)?/gi;
-
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = stream.getReader();
@@ -38,30 +36,18 @@ const streamPlaylistRewrite = (
         partialChunk = lines.pop() ?? '';
 
         for (const line of lines) {
-          const modifiedLine = line
-            .replace(segmentRegexM, (segment) => {
-              let segmentUrl = segment;
+          const modifiedLine = line.replace(segmentRegex, (segment) => {
+            let segmentUrl = segment;
 
-              if (segment.startsWith('/')) {
-                segmentUrl = `${origin}/${segment}${originalUrl.search}`.trim();
-              } else {
-                segmentUrl =
-                  `${origin}${pathname}/${segment}${originalUrl.search}`.trim();
-              }
+            if (segment.startsWith('/')) {
+              segmentUrl = `${origin}${segment}${originalUrl.search}`.trim();
+            } else {
+              segmentUrl =
+                `${origin}${pathname}/${segment}${originalUrl.search}`.trim();
+            }
 
-              return `/hls?url=${encodeURIComponent(segmentUrl)}`;
-            })
-            .replace(segmentRegexTs, (segment) => {
-              let segmentUrl = segment;
-
-              if (segment.startsWith('/')) {
-                segmentUrl = `${origin}/${segment}${originalUrl.search}`.trim();
-              } else {
-                segmentUrl =
-                  `${origin}${pathname}/${segment}${originalUrl.search}`.trim();
-              }
-              return `/hls?url=${encodeURIComponent(segmentUrl)}`;
-            });
+            return `/hls?url=${encodeURIComponent(segmentUrl)}`;
+          });
           controller.enqueue(encoder.encode(`${modifiedLine}\n`));
         }
       }
