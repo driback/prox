@@ -1,8 +1,18 @@
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 import { HlsController } from './modules/hls/hls.controller';
 import { MediaController } from './modules/media/media.controller';
 
 const app = new Hono();
+
+app.use(
+  '*',
+  cors({
+    origin: '*',
+    allowMethods: ['GET'],
+    allowHeaders: ['Content-Type'],
+  })
+);
 
 app.get('/', (c) => c.text('Hono!'));
 app.get('/media', ...MediaController);
