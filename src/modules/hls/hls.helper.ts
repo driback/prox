@@ -1,9 +1,11 @@
+// Compiled regex patterns for better performance
 const MPEGURL_REGEX = /mpegurl/i;
 const SEGMENT_REGEX =
   /^(?!#)(.+\.(?:m3u8|ts|cmf[va])|seg-.+\.cmf[va])(\?[^#\r\n]*)?$/gim;
 const AUDIO_URI_REGEX = /URI="([^"]+)"/;
 const MAP_URI_REGEX = /#EXT-X-MAP:URI="([^"]+)"/;
 
+// Reusable text decoder/encoder instances
 const TEXT_DECODER = new TextDecoder();
 const TEXT_ENCODER = new TextEncoder();
 
@@ -25,53 +27,57 @@ const buildSegmentUrl = (
     ? `${origin}${segment}`
     : `${origin}${pathname}/${segment}`;
 
-  return `${baseUrl}${search}`.trim();
+  return segment.includes('?') ? baseUrl.trim() : `${baseUrl}${search}`.trim();
 };
 
-const processAudioLine = (
-  line: string,
+const buildAudioUrl = (
+  audioUrl: string,
   origin: string,
   pathname: string,
   search: string
 ): string => {
-  const match = line.match(AUDIO_URI_REGEX);
-  if (!match?.[1]) return line;
-
-  const audioUrl = match[1].replace('../', '');
   const pathSegments = pathname.split('/');
   const newPathname = pathSegments.slice(1, -1).join('/');
-  const segmentUrl = `${origin}/${newPathname}/${audioUrl}${search}`.trim();
+  const baseUrl = `${origin}/${newPathname}/${audioUrl}`;
 
-  return line.replace(
-    AUDIO_URI_REGEX,
-    `URI="/hls?url=${encodeURIComponent(segmentUrl)}"`
-  );
+  return audioUrl.includes('?') ? baseUrl.trim() : `${baseUrl}${search}`.trim();
 };
 
-const processMapLine = (
+const processLine = (
   line: string,
   origin: string,
   pathname: string,
   search: string
 ): string => {
-  const match = line.match(MAP_URI_REGEX);
-  if (!match?.[1]) return line;
+  // Handle audio lines
+  if (line.startsWith('#EXT-X-MEDIA:TYPE=AUDIO')) {
+    const match = line.match(AUDIO_URI_REGEX);
+    if (match?.[1]) {
+      const audioUrl = match[1].replace('../', '');
+      const segmentUrl = buildAudioUrl(audioUrl, origin, pathname, search);
+      return line.replace(
+        AUDIO_URI_REGEX,
+        `URI="/hls?url=${encodeURIComponent(segmentUrl)}"`
+      );
+    }
+    return line;
+  }
 
-  const mapUrl = match[1].replace('../', '');
-  const segmentUrl = buildSegmentUrl(mapUrl, origin, pathname, search);
+  // Handle map lines
+  if (line.startsWith('#EXT-X-MAP:')) {
+    const match = line.match(MAP_URI_REGEX);
+    if (match?.[1]) {
+      const mapUrl = match[1].replace('../', '');
+      const segmentUrl = buildSegmentUrl(mapUrl, origin, pathname, search);
+      return line.replace(
+        MAP_URI_REGEX,
+        `#EXT-X-MAP:URI="/hls?url=${encodeURIComponent(segmentUrl)}"`
+      );
+    }
+    return line;
+  }
 
-  return line.replace(
-    MAP_URI_REGEX,
-    `#EXT-X-MAP:URI="/hls?url=${encodeURIComponent(segmentUrl)}"`
-  );
-};
-
-const processSegmentLine = (
-  line: string,
-  origin: string,
-  pathname: string,
-  search: string
-): string => {
+  // Handle segment lines
   return line.replace(SEGMENT_REGEX, (segment) => {
     const segmentUrl = buildSegmentUrl(segment, origin, pathname, search);
     return `/hls?url=${encodeURIComponent(segmentUrl)}`;
@@ -100,43 +106,14 @@ const streamPlaylistRewrite = (
           const lines = buffer.split('\n');
           buffer = lines.pop() ?? '';
 
-          for (let line of lines) {
-            // Process different line types
-            if (line.startsWith('#EXT-X-MEDIA:TYPE=AUDIO')) {
-              line = processAudioLine(line, origin, pathname, search);
-            } else if (line.startsWith('#EXT-X-MAP:')) {
-              line = processMapLine(line, origin, pathname, search);
-            } else {
-              // Process segment lines (including .cmfv files)
-              line = processSegmentLine(line, origin, pathname, search);
-            }
-
-            controller.enqueue(TEXT_ENCODER.encode(`${line}\n`));
+          for (const line of lines) {
+            const processedLine = processLine(line, origin, pathname, search);
+            controller.enqueue(TEXT_ENCODER.encode(`${processedLine}\n`));
           }
         }
 
-        // Handle remaining buffer content
         if (buffer) {
-          let processedBuffer = buffer;
-
-          if (buffer.startsWith('#EXT-X-MEDIA:TYPE=AUDIO')) {
-            processedBuffer = processAudioLine(
-              buffer,
-              origin,
-              pathname,
-              search
-            );
-          } else if (buffer.startsWith('#EXT-X-MAP:')) {
-            processedBuffer = processMapLine(buffer, origin, pathname, search);
-          } else {
-            processedBuffer = processSegmentLine(
-              buffer,
-              origin,
-              pathname,
-              search
-            );
-          }
-
+          const processedBuffer = processLine(buffer, origin, pathname, search);
           controller.enqueue(TEXT_ENCODER.encode(processedBuffer));
         }
       } catch (error) {
