@@ -1,75 +1,80 @@
-import type { ContentfulStatusCode } from 'hono/utils/http-status';
-
 import { createFactory } from 'hono/factory';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { MAX_FILE_SIZE, MEDIA_CONTENT_TYPES } from './media.constant';
 import { processResponseBody } from './media.helper';
 
 const factory = createFactory();
 
 export const MediaController = factory.createHandlers(async (c) => {
-  const targetUrlString = c.req.query('url');
-  if (!targetUrlString) {
-    return c.text('No URL provided', 400);
-  }
+  const targetUrl = c.req.query('url');
+  if (!targetUrl) return c.text('No URL provided', 400);
+
+  const rangeHeader = c.req.header('range');
+
+  const fetchOptions: RequestInit = {
+    method: 'GET',
+    headers: {
+      Accept: 'video/*,audio/*,image/*',
+      'Accept-Encoding': 'identity',
+      ...(rangeHeader && { Range: rangeHeader }),
+    },
+  };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  fetchOptions.signal = controller.signal;
 
   try {
-    const fetchOptions: RequestInit = {
-      method: 'GET',
-      headers: {
-        Accept: 'video/*,audio/*,image/*',
-        'Accept-Encoding': 'identity',
-      },
-    };
+    const upstream = await fetch(targetUrl, fetchOptions);
+    clearTimeout(timeout);
 
-    const response = await fetch(targetUrlString, fetchOptions);
-    if (!response.ok) {
+    if (!upstream.ok && upstream.status !== 206) {
       return c.text(
-        `Fetch failed: ${response.status} ${response.statusText}`,
-        response.status as ContentfulStatusCode
+        `Fetch failed: ${upstream.status} ${upstream.statusText}`,
+        upstream.status as ContentfulStatusCode
       );
     }
 
-    const contentType = response.headers
+    const contentType = upstream.headers
       .get('content-type')
-      ?.split(';')?.[0]
+      ?.split(';')[0]
       ?.trim()
       .toLowerCase();
-    if (!(contentType && MEDIA_CONTENT_TYPES.has(contentType))) {
+    if (!contentType || !MEDIA_CONTENT_TYPES.has(contentType)) {
       return c.text('Unsupported Media Type', 415);
     }
 
-    const contentLength = response.headers.get('content-length');
+    const contentLength = upstream.headers.get('content-length');
     if (contentLength && Number.parseInt(contentLength, 10) > MAX_FILE_SIZE) {
       return c.text('File too large', 413);
     }
 
-    const responseHeaders = new Headers({
-      'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+    const headers = new Headers({
+      'Cache-Control': 'public, max-age=86400, must-revalidate',
+      'Content-Disposition': 'inline',
+      Vary: 'Range',
     });
-    const allowedHeaders = [
-      'content-type',
-      'content-length',
-      'accept-ranges',
-      'content-range',
-    ];
 
-    for (const header of allowedHeaders) {
-      const value = response.headers.get(header);
-      if (value) {
-        responseHeaders.set(header, value);
-      }
+    const passthroughHeaders = [
+      'Content-Type',
+      'Content-Length',
+      'Accept-Ranges',
+      'Content-Range',
+    ];
+    for (const key of passthroughHeaders) {
+      const value = upstream.headers.get(key);
+      if (value) headers.set(key, value);
     }
 
-    const bodyStream = processResponseBody(response);
-
-    return new Response(bodyStream, {
-      status: 200,
-      headers: responseHeaders,
+    return new Response(processResponseBody(upstream), {
+      status: upstream.status === 206 ? 206 : 200,
+      headers,
     });
-  } catch (error) {
-    console.error('Media Proxy Error:', error);
+  } catch (err) {
+    clearTimeout(timeout);
+    console.error('Media Proxy Error:', err);
 
-    const errorMessage = error instanceof Error ? error.message : 'Proxy Error';
-    return c.text(errorMessage, 500);
+    const message = err instanceof Error ? err.message : 'Proxy Error';
+    return c.text(message, 500);
   }
 });

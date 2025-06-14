@@ -15,33 +15,50 @@ export const HlsController = factory.createHandlers(async (c) => {
     return c.text('Invalid URL provided', 400);
   }
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+
   try {
-    const response = await fetch(targetUrl.href);
-    if (!response.ok) {
+    const upstream = await fetch(targetUrl.href, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!upstream.ok) {
       return c.text(
-        `Fetch failed: ${response.status} ${response.statusText}`,
-        response.status as ContentfulStatusCode
+        `Fetch failed: ${upstream.status} ${upstream.statusText}`,
+        upstream.status as ContentfulStatusCode
       );
     }
 
     const contentType =
-      response.headers.get('content-type') ?? 'application/octet-stream';
+      upstream.headers
+        .get('content-type')
+        ?.split(';')[0]
+        ?.trim()
+        .toLowerCase() || 'application/vnd.apple.mpegurl';
+
     const headers = new Headers({
       'Content-Type': contentType,
-      'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-      Pragma: 'no-cache',
-      Expires: '0',
+      'Cache-Control': 'public, max-age=3600, must-revalidate',
+      'Content-Disposition': 'inline',
+      Vary: 'Origin, Range',
     });
 
-    const bodyStream = processResponseBody(
-      response,
-      contentType,
-      targetUrl.href
-    );
-    return new Response(bodyStream, { status: 200, headers });
-  } catch (error) {
-    console.error('Media HLS Proxy Error:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Proxy Error';
-    return c.text(errorMessage, 500);
+    const passthrough = ['Content-Length', 'Accept-Ranges', 'Content-Range'];
+    for (const key of passthrough) {
+      const value = upstream.headers.get(key);
+      if (value) headers.set(key, value);
+    }
+
+    const stream = processResponseBody(upstream, contentType, targetUrl.href);
+    return new Response(stream, {
+      status: upstream.status === 206 ? 206 : 200,
+      headers,
+    });
+  } catch (err) {
+    clearTimeout(timeout);
+    console.error('Media HLS Proxy Error:', err);
+
+    const msg = err instanceof Error ? err.message : 'Proxy Error';
+    return c.text(msg, 500);
   }
 });
