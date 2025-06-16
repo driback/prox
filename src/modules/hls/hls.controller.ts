@@ -38,12 +38,16 @@ export const HlsController = factory.createHandlers(async (c) => {
 
     const headers = new Headers({
       'Content-Type': contentType,
-      'Cache-Control': 'public, max-age=3600, must-revalidate',
       'Content-Disposition': 'inline',
       Vary: 'Origin, Range',
     });
 
-    const passthrough = ['Content-Length', 'Accept-Ranges', 'Content-Range'];
+    const passthrough = [
+      'Cache-Control',
+      'Content-Length',
+      'Accept-Ranges',
+      'Content-Range',
+    ];
     for (const key of passthrough) {
       const value = upstream.headers.get(key);
       if (value) headers.set(key, value);
