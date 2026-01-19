@@ -14,7 +14,7 @@ app.use(
   })
 );
 
-app.get('/', (c) => c.text('Hono!'));
+app.get('/', (c) => c.text('Hono!!'));
 app.get('/media', ...MediaController);
 app.get('/hls', ...HlsController);
 
