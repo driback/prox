@@ -87,10 +87,11 @@ export const processResponseBody = (
   contentType: string,
   targetUrl: string
 ): ReadableStream<Uint8Array> => {
-  const isHls = /application\/vnd\.apple\.mpegurl|audio\/mpegurl/i.test(contentType) 
-             || targetUrl.includes('.m3u8');
+  const isPlaylist = 
+    /application\/vnd\.apple\.mpegurl|audio\/mpegurl/i.test(contentType) ||
+    targetUrl.includes('.m3u8');
 
-  if (!isHls || !response.body) {
+  if (!isPlaylist || !response.body) {
     return response.body || createEmptyStream();
   }
 
