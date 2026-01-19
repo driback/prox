@@ -1,90 +1,127 @@
-const URI_ATTR_REGEX = /URI="([^"]+)"/;
+// Compiled regex patterns for better performance
+const MPEGURL_REGEX = /mpegurl/i;
 
+const SEGMENT_REGEX =
+  /^(?!#)(.+\.(?:m3u8|ts|cmf[va]|m4s|m4v|m4a)|seg-.+\.(?:cmf[va]|m4s|m4v|m4a))(\?[^#\r\n]*)?$/gim;
+
+const AUDIO_URI_REGEX = /URI="([^"]+)"/;
+const MAP_URI_REGEX = /#EXT-X-MAP:URI="([^"]+)"/;
+
+// Reusable text decoder/encoder instances
+const TEXT_DECODER = new TextDecoder();
 const TEXT_ENCODER = new TextEncoder();
 
 const createEmptyStream = (): ReadableStream<Uint8Array> => {
-  return new ReadableStream({
+  return new ReadableStream<Uint8Array>({
     start(controller) {
       controller.close();
     },
   });
 };
 
-const resolveAndProxyUrl = (targetPath: string, manifestBaseUrl: string): string => {
-  try {
-    // FIX: Remove trailing semicolons or whitespace that break the fetch
-    const cleanPath = targetPath.trim().replace(/;+$/, '');
-    
-    const resolvedUrl = new URL(cleanPath, manifestBaseUrl).toString();
-    return `/hls?url=${encodeURIComponent(resolvedUrl)}`;
-  } catch (e) {
-    return targetPath;
-  }
+const buildSegmentUrl = (
+  segment: string,
+  origin: string,
+  pathname: string,
+  search: string
+): string => {
+  const baseUrl = segment.startsWith('/')
+    ? `${origin}${segment}`
+    : `${origin}${pathname}/${segment}`;
+
+  return segment.includes('?') ? baseUrl.trim() : `${baseUrl}${search}`.trim();
+};
+
+const buildAudioUrl = (
+  audioUrl: string,
+  origin: string,
+  pathname: string,
+  search: string
+): string => {
+  const pathSegments = pathname.split('/');
+  const newPathname = pathSegments.slice(1, -1).join('/');
+  const baseUrl = `${origin}/${newPathname}/${audioUrl}`;
+
+  return audioUrl.includes('?') ? baseUrl.trim() : `${baseUrl}${search}`.trim();
 };
 
 const processLine = (
   line: string,
-  manifestBaseUrl: string
+  origin: string,
+  pathname: string,
+  search: string
 ): string => {
-  const trimmedLine = line.trim();
-
-  if (!trimmedLine) return line;
-
-  if (trimmedLine.startsWith('#')) {
-    if (
-      trimmedLine.startsWith('#EXT-X-MEDIA') || 
-      trimmedLine.startsWith('#EXT-X-MAP') || 
-      trimmedLine.startsWith('#EXT-X-KEY')
-    ) {
-      return line.replace(URI_ATTR_REGEX, (match, uriValue) => {
-        const proxiedUrl = resolveAndProxyUrl(uriValue, manifestBaseUrl);
-        return `URI="${proxiedUrl}"`;
-      });
+  // Handle audio lines
+  if (line.startsWith('#EXT-X-MEDIA:TYPE=AUDIO')) {
+    const match = line.match(AUDIO_URI_REGEX);
+    if (match?.[1]) {
+      const audioUrl = match[1].replace('../', '');
+      const segmentUrl = buildAudioUrl(audioUrl, origin, pathname, search);
+      return line.replace(
+        AUDIO_URI_REGEX,
+        `URI="/hls?url=${encodeURIComponent(segmentUrl)}"`
+      );
     }
     return line;
   }
 
-  return resolveAndProxyUrl(trimmedLine, manifestBaseUrl);
+  // Handle map lines
+  if (line.startsWith('#EXT-X-MAP:')) {
+    const match = line.match(MAP_URI_REGEX);
+    if (match?.[1]) {
+      const mapUrl = match[1].replace('../', '');
+      const segmentUrl = buildSegmentUrl(mapUrl, origin, pathname, search);
+      return line.replace(
+        MAP_URI_REGEX,
+        `#EXT-X-MAP:URI="/hls?url=${encodeURIComponent(segmentUrl)}"`
+      );
+    }
+    return line;
+  }
+
+  // Handle segment lines
+  return line.replace(SEGMENT_REGEX, (segment) => {
+    const segmentUrl = buildSegmentUrl(segment, origin, pathname, search);
+    return `/hls?url=${encodeURIComponent(segmentUrl)}`;
+  });
 };
 
 const streamPlaylistRewrite = (
   stream: ReadableStream<Uint8Array>,
   targetUrl: string
 ): ReadableStream<Uint8Array> => {
+  const url = new URL(targetUrl);
+  const { origin, pathname: fullPathname, search } = url;
+  const pathname = fullPathname.substring(0, fullPathname.lastIndexOf('/'));
+
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = stream.getReader();
       let buffer = '';
-      
-      const decoder = new TextDecoder('utf-8', { fatal: false });
 
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          buffer += decoder.decode(value, { stream: true });
-          
+          buffer += TEXT_DECODER.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() ?? '';
 
           for (const line of lines) {
-            const processed = processLine(line, targetUrl);
-            controller.enqueue(TEXT_ENCODER.encode(`${processed}\n`));
+            const processedLine = processLine(line, origin, pathname, search);
+            controller.enqueue(TEXT_ENCODER.encode(`${processedLine}\n`));
           }
         }
 
-        buffer += decoder.decode();
-
         if (buffer) {
-          const processed = processLine(buffer, targetUrl);
-          controller.enqueue(TEXT_ENCODER.encode(processed));
+          const processedBuffer = processLine(buffer, origin, pathname, search);
+          controller.enqueue(TEXT_ENCODER.encode(processedBuffer));
         }
       } catch (error) {
         controller.error(error);
       } finally {
         controller.close();
-        reader.releaseLock();
       }
     },
   });
@@ -95,12 +132,13 @@ export const processResponseBody = (
   contentType: string,
   targetUrl: string
 ): ReadableStream<Uint8Array> => {
-  const isPlaylist = 
-    /application\/vnd\.apple\.mpegurl|audio\/mpegurl/i.test(contentType) ||
-    targetUrl.includes('.m3u8');
-
-  if (!isPlaylist || !response.body) {
+  if (!MPEGURL_REGEX.test(contentType)) {
     return response.body || createEmptyStream();
+  }
+
+  if (!response.body) {
+    console.warn('No response body for HLS playlist');
+    return createEmptyStream();
   }
 
   return streamPlaylistRewrite(response.body, targetUrl);
