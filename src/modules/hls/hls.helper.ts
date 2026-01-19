@@ -2,9 +2,8 @@
 // Regex patterns (compiled once)
 // ==============================
 const MPEGURL_REGEX = /mpegurl/i;
-
 const SEGMENT_REGEX =
-  /^(?!#)(.+\.(?:m3u8|ts|cmf[va]|m4s|m4v|m4a|mp4a|mp4v)|seg-.+\.(?:cmf[va]|m4s|m4v|m4a|mp4a|mp4v))(\?[^#\r\n]*)?$/gim;
+  /^(?!#)(.+\.(?:m3u8|ts|m4s|cmf[va]|m4[av]|mp4[av]|fmp4|aac|mp4|mov)|seg-.+\.(?:m4s|cmf[va]|m4[av]|mp4[av]|fmp4|aac|mp4|mov))(\?[^#\r\n]*)?$/gim;
 const AUDIO_URI_REGEX = /URI="([^"]+)"/;
 const MAP_URI_REGEX = /#EXT-X-MAP:URI="([^"]+)"/;
 
