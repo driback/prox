@@ -1,8 +1,5 @@
 const URI_ATTR_REGEX = /URI="([^"]+)"/g;
 const PART_URI_REGEX = /PART="([^"]+)"/g;
-const PRELOAD_URI_REGEX = /URI="([^"]+)"/;
-const BYTERANGE_URI_REGEX = /^(.*)$/;
-
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: false });
 
@@ -16,6 +13,7 @@ const resolveAndProxyUrl = (targetPath: string, manifestBaseUrl: string): string
   try {
     const clean = targetPath.trim().replace(/;+$/, "");
     if (!clean || isAlreadyProxied(clean)) return clean;
+    if (clean.startsWith('data:')) return clean;
 
     const resolved = new URL(clean, manifestBaseUrl).toString();
     return `/hls?url=${encodeURIComponent(resolved)}`;
@@ -36,27 +34,33 @@ const processLine = (line: string, manifestBaseUrl: string): string => {
 
   if (!trimmed) return rawLine;
 
-  // Comments / Tags
+  if (trimmed.startsWith('#EXTINF:')) return rawLine;
+  if (trimmed.startsWith('#EXT-X-TARGETDURATION')) return rawLine;
+  if (trimmed.startsWith('#EXT-X-VERSION')) return rawLine;
+  if (trimmed.startsWith('#EXT-X-MEDIA-SEQUENCE')) return rawLine;
+  if (trimmed.startsWith('#EXT-X-DISCONTINUITY-SEQUENCE')) return rawLine;
+  if (trimmed.startsWith('#EXT-X-ENDLIST')) return rawLine;
+  if (trimmed.startsWith('#EXT-X-PLAYLIST-TYPE')) return rawLine;
+
   if (trimmed.startsWith("#")) {
-    // LL-HLS tags that contain URIs
-    if (
-      trimmed.startsWith("#EXT-X-MEDIA") ||
-      trimmed.startsWith("#EXT-X-MAP") ||
-      trimmed.startsWith("#EXT-X-KEY") ||
-      trimmed.startsWith("#EXT-X-SESSION-KEY") ||
-      trimmed.startsWith("#EXT-X-I-FRAME-STREAM-INF") ||
-      trimmed.startsWith("#EXT-X-RENDITION-REPORT") ||
-      trimmed.startsWith("#EXT-X-PART") ||
-      trimmed.startsWith("#EXT-X-PRELOAD-HINT")
-    ) {
+    const uriTags = [
+      "#EXT-X-MEDIA",
+      "#EXT-X-MAP",
+      "#EXT-X-KEY",
+      "#EXT-X-SESSION-KEY",
+      "#EXT-X-I-FRAME-STREAM-INF",
+      "#EXT-X-RENDITION-REPORT",
+      "#EXT-X-PART",
+      "#EXT-X-PRELOAD-HINT"
+    ];
+
+    if (uriTags.some(tag => trimmed.startsWith(tag))) {
       return rewriteAttributeUris(rawLine, manifestBaseUrl);
     }
 
-    // EXT-X-SERVER-CONTROL has no URI, keep untouched
     return rawLine;
   }
 
-  // Segment URL or Partial Segment URL
   return resolveAndProxyUrl(trimmed, manifestBaseUrl);
 };
 
@@ -67,7 +71,7 @@ const streamPlaylistRewrite = (
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = stream.getReader();
-      let buffer = "";
+      let buffer = new Uint8Array(0);
       let failed = false;
 
       try {
@@ -75,20 +79,26 @@ const streamPlaylistRewrite = (
           const { done, value } = await reader.read();
           if (done) break;
 
-          buffer += TEXT_DECODER.decode(value, { stream: true });
+          const newBuffer = new Uint8Array(buffer.length + value.length);
+          newBuffer.set(buffer);
+          newBuffer.set(value, buffer.length);
+          buffer = newBuffer;
 
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-
-          for (const line of lines) {
+          let newlineIndex;
+          while ((newlineIndex = buffer.indexOf(0x0A)) !== -1) {
+            const lineEnd = newlineIndex;
+            const lineStart = buffer[newlineIndex - 1] === 0x0D ? newlineIndex - 1 : newlineIndex;
+            const lineBytes = buffer.slice(0, lineEnd + 1);
+            const line = TEXT_DECODER.decode(lineBytes);
             const processed = processLine(line, targetUrl);
-            controller.enqueue(TEXT_ENCODER.encode(processed + "\n"));
+            controller.enqueue(TEXT_ENCODER.encode(processed));
+            buffer = buffer.slice(newlineIndex + 1);
           }
         }
 
-        buffer += TEXT_DECODER.decode();
-        if (buffer) {
-          const processed = processLine(buffer, targetUrl);
+        if (buffer.length > 0) {
+          const line = TEXT_DECODER.decode(buffer);
+          const processed = processLine(line, targetUrl);
           controller.enqueue(TEXT_ENCODER.encode(processed));
         }
       } catch (err) {
@@ -108,7 +118,7 @@ export const processResponseBody = (
   contentType: string,
   targetUrl: string
 ): ReadableStream<Uint8Array> => {
-  const isPlaylist =
+  const isPlaylist = 
     targetUrl.includes(".m3u8") ||
     /mpegurl|x-mpegurl|octet-stream/i.test(contentType);
 
