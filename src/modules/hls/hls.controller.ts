@@ -1,7 +1,4 @@
 import { createFactory } from 'hono/factory';
-import type { ContentfulStatusCode } from 'hono/utils/http-status';
-import { processResponseBody } from './hls.helper';
-
 const factory = createFactory();
 
 export const HlsController = factory.createHandlers(async (c) => {
@@ -20,7 +17,9 @@ export const HlsController = factory.createHandlers(async (c) => {
 
   let timeout: NodeJS.Timeout | undefined;
   if (!isPlaylistRequest) {
-    timeout = setTimeout(() => controller.abort(), 30_000);
+    timeout = setTimeout(() => controller.abort(), 120_000);
+  } else {
+    timeout = setTimeout(() => controller.abort(), 10_000);
   }
 
   try {
@@ -32,7 +31,6 @@ export const HlsController = factory.createHandlers(async (c) => {
     if (range) requestHeaders.set('Range', range);
     if (ifRange) requestHeaders.set('If-Range', ifRange);
     if (userAgent) requestHeaders.set('User-Agent', userAgent);
-
     requestHeaders.set('Referer', targetUrl.origin);
 
     const upstream = await fetch(targetUrl.href, {
@@ -46,9 +44,15 @@ export const HlsController = factory.createHandlers(async (c) => {
     const finalUrl = upstream.url || targetUrl.href;
     let contentType = upstream.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
 
-    const isM3u8 =
+    const isM3u8 = 
       finalUrl.includes('.m3u8') ||
-      (contentType && /mpegurl/i.test(contentType));
+      targetUrl.pathname.includes('.m3u8') ||
+      (contentType && (
+        /mpegurl/i.test(contentType) ||
+        /vnd\.apple\.mpegurl/i.test(contentType) ||
+        contentType === 'application/x-mpegurl' ||
+        contentType === 'audio/x-mpegurl'
+      ));
 
     if (!contentType) {
       contentType = isM3u8
@@ -64,20 +68,35 @@ export const HlsController = factory.createHandlers(async (c) => {
     });
 
     if (isM3u8) {
-      headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      const isLive = targetUrl.pathname.includes('live') || targetUrl.pathname.includes('master');
+      if (isLive) {
+        headers.set('Cache-Control', 'no-cache, max-age=0');
+      } else {
+        headers.set('Cache-Control', 'public, max-age=2');
+      }
       headers.set('Pragma', 'no-cache');
     } else {
       headers.set('Accept-Ranges', 'bytes');
+      const contentLength = upstream.headers.get('Content-Length');
+      const contentRange = upstream.headers.get('Content-Range');
+      if (contentLength && !contentRange) {
+        headers.set('Content-Length', contentLength);
+      }
+    }
+
+    if (upstream.status === 206) {
+      const contentRange = upstream.headers.get('Content-Range');
+      if (contentRange) {
+        const match = contentRange.match(/bytes \d+-\d+\/(\d+)/);
+        if (match) {
+          headers.set('Content-Length', String(parseInt(match[1]) - parseInt(contentRange.split(' ')[1].split('-')[0]) + 1));
+        }
+      }
     }
 
     for (const key of ['Content-Range', 'Last-Modified', 'ETag']) {
       const value = upstream.headers.get(key);
       if (value) headers.set(key, value);
-    }
-
-    if (!isM3u8 && upstream.status === 200) {
-      const contentLength = upstream.headers.get('Content-Length');
-      if (contentLength) headers.set('Content-Length', contentLength);
     }
 
     const stream = processResponseBody(upstream, contentType, finalUrl);
@@ -90,6 +109,15 @@ export const HlsController = factory.createHandlers(async (c) => {
   } catch (err) {
     if (timeout) clearTimeout(timeout);
     console.error('Media HLS Proxy Error:', err);
+    
+    if (process.env.DEBUG_HLS === 'true') {
+      console.error('HLS Proxy Error Details:', {
+        url: targetUrl.href,
+        isPlaylist: isPlaylistRequest,
+        error: (err as Error).message,
+        stack: (err as Error).stack
+      });
+    }
 
     if (err instanceof DOMException && err.name === 'AbortError') {
       return c.text('Upstream timeout', 504);
