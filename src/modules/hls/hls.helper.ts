@@ -1,6 +1,5 @@
 const URI_ATTR_REGEX = /URI="([^"]+)"/;
 
-const TEXT_DECODER = new TextDecoder();
 const TEXT_ENCODER = new TextEncoder();
 
 const createEmptyStream = (): ReadableStream<Uint8Array> => {
@@ -53,13 +52,16 @@ const streamPlaylistRewrite = (
     async start(controller) {
       const reader = stream.getReader();
       let buffer = '';
+      
+      const decoder = new TextDecoder('utf-8', { fatal: false });
 
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          buffer += TEXT_DECODER.decode(value, { stream: true });
+          buffer += decoder.decode(value, { stream: true });
+          
           const lines = buffer.split('\n');
           buffer = lines.pop() ?? '';
 
@@ -69,6 +71,8 @@ const streamPlaylistRewrite = (
           }
         }
 
+        buffer += decoder.decode();
+
         if (buffer) {
           const processed = processLine(buffer, targetUrl);
           controller.enqueue(TEXT_ENCODER.encode(processed));
@@ -77,6 +81,7 @@ const streamPlaylistRewrite = (
         controller.error(error);
       } finally {
         controller.close();
+        reader.releaseLock();
       }
     },
   });
