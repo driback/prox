@@ -53,12 +53,12 @@ export const HlsController = factory.createHandlers(async (c) => {
     const headers = new Headers({
       'Content-Type': contentType,
       'Content-Disposition': 'inline',
-      Vary: 'Origin, Range',
+      'Accept-Ranges': 'bytes',
+      'Vary': 'Origin, Range',
     });
 
     const passthrough = [
       'Cache-Control',
-      'Accept-Ranges',
       'Content-Range',
       'Last-Modified',
       'ETag'
@@ -70,8 +70,12 @@ export const HlsController = factory.createHandlers(async (c) => {
     }
 
     if (!isPlaylist) {
-      const length = upstream.headers.get('Content-Length');
-      if (length) headers.set('Content-Length', length);
+      const contentEncoding = upstream.headers.get('Content-Encoding');
+      const contentLength = upstream.headers.get('Content-Length');
+      
+      if (contentLength && !contentEncoding) {
+        headers.set('Content-Length', contentLength);
+      }
     }
 
     const stream = processResponseBody(upstream, contentType, targetUrl.href);
