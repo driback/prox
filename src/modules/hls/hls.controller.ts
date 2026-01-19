@@ -15,74 +15,69 @@ export const HlsController = factory.createHandlers(async (c) => {
     return c.text('Invalid URL provided', 400);
   }
 
+  const isPlaylistRequest = targetUrl.pathname.endsWith('.m3u8');
   const controller = new AbortController();
-  // 30s timeout to prevent "Internal Server Error" on slow streams
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+
+  let timeout: NodeJS.Timeout | undefined;
+  if (!isPlaylistRequest) {
+    timeout = setTimeout(() => controller.abort(), 30_000);
+  }
 
   try {
     const requestHeaders = new Headers();
     const range = c.req.header('range');
+    const ifRange = c.req.header('if-range');
     const userAgent = c.req.header('user-agent');
-    
+
     if (range) requestHeaders.set('Range', range);
+    if (ifRange) requestHeaders.set('If-Range', ifRange);
     if (userAgent) requestHeaders.set('User-Agent', userAgent);
-    
-    // Crucial: Fixes streams that check for hotlinking
+
     requestHeaders.set('Referer', targetUrl.origin);
 
-    const upstream = await fetch(targetUrl.href, { 
+    const upstream = await fetch(targetUrl.href, {
       signal: controller.signal,
       headers: requestHeaders,
       redirect: 'follow',
     });
-    
-    clearTimeout(timeout);
 
-    if (!upstream.ok) {
-      return c.text(
-        `Fetch failed: ${upstream.status} ${upstream.statusText}`,
-        upstream.status as ContentfulStatusCode
-      );
-    }
+    if (timeout) clearTimeout(timeout);
 
     const finalUrl = upstream.url || targetUrl.href;
     let contentType = upstream.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
-    
-    const isM3u8 = finalUrl.includes('.m3u8') || 
-                   (contentType && /application\/vnd\.apple\.mpegurl|audio\/mpegurl/i.test(contentType));
+
+    const isM3u8 =
+      finalUrl.includes('.m3u8') ||
+      (contentType && /mpegurl/i.test(contentType));
 
     if (!contentType) {
-      contentType = isM3u8 ? 'application/vnd.apple.mpegurl' : 'video/mp2t';
+      contentType = isM3u8
+        ? 'application/vnd.apple.mpegurl'
+        : 'video/mp2t';
     }
 
     const headers = new Headers({
       'Content-Type': contentType,
       'Access-Control-Allow-Origin': '*',
       'Content-Disposition': 'inline',
-      'Accept-Ranges': 'bytes',
       'Vary': 'Origin, Range',
     });
 
     if (isM3u8) {
-      headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      headers.set('Pragma', 'no-cache');
     } else {
-      const cacheControl = upstream.headers.get('Cache-Control');
-      if (cacheControl) headers.set('Cache-Control', cacheControl);
+      headers.set('Accept-Ranges', 'bytes');
     }
 
-    const passthrough = ['Content-Range', 'Last-Modified', 'ETag'];
-    for (const key of passthrough) {
+    for (const key of ['Content-Range', 'Last-Modified', 'ETag']) {
       const value = upstream.headers.get(key);
       if (value) headers.set(key, value);
     }
 
-    if (!isM3u8) {
-      const contentEncoding = upstream.headers.get('Content-Encoding');
+    if (!isM3u8 && upstream.status === 200) {
       const contentLength = upstream.headers.get('Content-Length');
-      
-      if (contentLength && !contentEncoding) {
-        headers.set('Content-Length', contentLength);
-      }
+      if (contentLength) headers.set('Content-Length', contentLength);
     }
 
     const stream = processResponseBody(upstream, contentType, finalUrl);
@@ -93,8 +88,8 @@ export const HlsController = factory.createHandlers(async (c) => {
     });
 
   } catch (err) {
-    clearTimeout(timeout);
-    console.error('Media HLS Proxy Error:', err instanceof Error ? err.message : err);
+    if (timeout) clearTimeout(timeout);
+    console.error('Media HLS Proxy Error:', err);
 
     if (err instanceof DOMException && err.name === 'AbortError') {
       return c.text('Upstream timeout', 504);
