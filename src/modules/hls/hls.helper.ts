@@ -9,19 +9,12 @@ type UrlParts = {
 };
 
 // ==============================
-// Regex patterns (compiled once)
+// Constants & Regex
 // ==============================
 const MPEGURL_REGEX = /mpegurl/i;
-const SEGMENT_REGEX =
-  /^(?!#)(.+\.(?:m3u8|ts|m4s|cmf[va]|m4[av]|mp4[av]|fmp4|aac|mp4|mov)|seg-.+\.(?:m4s|cmf[va]|m4[av]|mp4[av]|fmp4|aac|mp4|mov))(\?[^#\r\n]*)?$/gim;
-const AUDIO_URI_REGEX = /URI="([^"]+)"/;
-const MAP_URI_REGEX = /#EXT-X-MAP:URI="([^"]+)"/;
-
-// ==============================
-// Constants
-// ==============================
+const GENERIC_URI_REGEX = /URI="([^"]+)"/;
 const REWRITE_PREFIX = "/hls?url=";
-const TEXT_DECODER = new TextDecoder();
+// TEXT_ENCODER is stateless, so it's safe to keep global
 const TEXT_ENCODER = new TextEncoder();
 
 // ==============================
@@ -37,17 +30,14 @@ const createEmptyStream = (): ReadableStream<Uint8Array> =>
 const isAbsoluteUrl = (url: string): boolean =>
   /^https?:\/\//i.test(url) || url.startsWith("//");
 
-const encodeProxyUrl = (url: string): string =>
+// Added encodeURIComponent back for safety
+const createProxyUrl = (url: string): string =>
   `${REWRITE_PREFIX}${encodeURIComponent(url)}`;
 
-/**
- * Safely resolve a relative or absolute URL against a base URL
- */
 const resolveUrl = (urlStr: string, baseUrl: string): string => {
   if (isAbsoluteUrl(urlStr)) {
     return urlStr;
   }
-
   try {
     return new URL(urlStr, baseUrl).href;
   } catch (err) {
@@ -56,9 +46,6 @@ const resolveUrl = (urlStr: string, baseUrl: string): string => {
   }
 };
 
-/**
- * Extract URL parts needed for rewriting
- */
 const extractUrlParts = (targetUrl: string): UrlParts => {
   const url = new URL(targetUrl);
   const pathname = url.pathname.substring(0, url.pathname.lastIndexOf("/"));
@@ -73,7 +60,8 @@ const extractUrlParts = (targetUrl: string): UrlParts => {
 };
 
 /**
- * Build a complete URL from a segment, preserving or adding query params
+ * Merges segment params with base params.
+ * Example: segment?v=1 + base?token=abc -> segment?v=1&token=abc
  */
 const buildCompleteUrl = (
   segment: string,
@@ -82,80 +70,68 @@ const buildCompleteUrl = (
 ): string => {
   const resolved = resolveUrl(segment, baseUrl);
 
-  // If segment already has query params, don't append base search
-  if (segment.includes("?")) {
+  if (!baseSearch) return resolved;
+
+  try {
+    const url = new URL(resolved);
+    // If we have base params, append them carefully
+    const baseParams = new URLSearchParams(baseSearch);
+
+    baseParams.forEach((value, key) => {
+      // Only append if the segment doesn't already have this key
+      if (!url.searchParams.has(key)) {
+        url.searchParams.append(key, value);
+      }
+    });
+
+    return url.href;
+  } catch {
     return resolved;
   }
-
-  // Otherwise, append base query params if they exist
-  if (baseSearch) {
-    try {
-      const url = new URL(resolved);
-      url.search = baseSearch;
-      return url.href;
-    } catch {
-      return resolved;
-    }
-  }
-
-  return resolved;
 };
 
 // ==============================
-// Line processor
+// Line Processor
 // ==============================
 const processLine = (line: string, urlParts: UrlParts): string => {
+  const cleanLine = line.trim();
+  if (!cleanLine) return line;
+
   const { baseUrl, search } = urlParts;
 
-  // --- AUDIO tracks (master playlist) ---
-  if (line.startsWith("#EXT-X-MEDIA:TYPE=AUDIO")) {
-    const match = line.match(AUDIO_URI_REGEX);
-    if (!match?.[1]) {
-      return line;
+  // --- Case A: Directives / Tags (Starts with #) ---
+  if (cleanLine.startsWith("#")) {
+    const isMedia = cleanLine.startsWith("#EXT-X-MEDIA:");
+    const isMap = cleanLine.startsWith("#EXT-X-MAP:");
+    const isKey = cleanLine.startsWith("#EXT-X-KEY:");
+
+    if (isMedia || isMap || isKey) {
+      return cleanLine.replace(GENERIC_URI_REGEX, (match, uri) => {
+        try {
+          const resolved = buildCompleteUrl(uri, baseUrl, search);
+          return `URI="${createProxyUrl(resolved)}"`;
+        } catch (err) {
+          console.warn(`Failed to rewrite URI in tag: ${cleanLine}`, err);
+          return match;
+        }
+      });
     }
 
-    try {
-      const resolved = buildCompleteUrl(match[1], baseUrl, search);
-      return line.replace(AUDIO_URI_REGEX, `URI="${encodeProxyUrl(resolved)}"`);
-    } catch (err) {
-      console.warn("Failed to process AUDIO URI:", match[1], err);
-      return line;
-    }
+    return cleanLine;
   }
 
-  // --- EXT-X-MAP (init segments) ---
-  if (line.startsWith("#EXT-X-MAP:")) {
-    const match = line.match(MAP_URI_REGEX);
-    if (!match?.[1]) {
-      return line;
-    }
-
-    try {
-      const resolved = buildCompleteUrl(match[1], baseUrl, search);
-      return line.replace(
-        MAP_URI_REGEX,
-        `#EXT-X-MAP:URI="${encodeProxyUrl(resolved)}"`
-      );
-    } catch (err) {
-      console.warn("Failed to process MAP URI:", match[1], err);
-      return line;
-    }
+  // --- Case B: Segment URIs (Everything else) ---
+  try {
+    const resolved = buildCompleteUrl(cleanLine, baseUrl, search);
+    return createProxyUrl(resolved);
+  } catch (err) {
+    console.warn("Failed to process segment:", cleanLine, err);
+    return cleanLine;
   }
-
-  // --- Media segments / variant playlists ---
-  return line.replace(SEGMENT_REGEX, (segment) => {
-    try {
-      const resolved = buildCompleteUrl(segment, baseUrl, search);
-      return encodeProxyUrl(resolved);
-    } catch (err) {
-      console.warn("Failed to process segment:", segment, err);
-      return segment;
-    }
-  });
 };
 
 // ==============================
-// Streaming playlist rewriter
+// Streaming Logic
 // ==============================
 const streamPlaylistRewrite = (
   stream: ReadableStream<Uint8Array>,
@@ -165,6 +141,8 @@ const streamPlaylistRewrite = (
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
+      // Create a new TextDecoder for EACH request to avoid state corruption
+      const decoder = new TextDecoder();
       const reader = stream.getReader();
       let buffer = "";
 
@@ -173,7 +151,7 @@ const streamPlaylistRewrite = (
           const { done, value } = await reader.read();
           if (done) break;
 
-          buffer += TEXT_DECODER.decode(value, { stream: true });
+          buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
 
@@ -183,7 +161,6 @@ const streamPlaylistRewrite = (
           }
         }
 
-        // Process remaining buffer
         if (buffer) {
           const processed = processLine(buffer, urlParts);
           controller.enqueue(TEXT_ENCODER.encode(processed));
@@ -199,7 +176,7 @@ const streamPlaylistRewrite = (
 };
 
 // ==============================
-// Public entry
+// Public Entry Point
 // ==============================
 export const processResponseBody = (
   response: Response,
