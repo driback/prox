@@ -25,10 +25,12 @@ export const HlsController = factory.createHandlers(async (c) => {
     
     if (range) requestHeaders.set('Range', range);
     if (userAgent) requestHeaders.set('User-Agent', userAgent);
+    requestHeaders.set('Referer', targetUrl.origin);
 
     const upstream = await fetch(targetUrl.href, { 
       signal: controller.signal,
-      headers: requestHeaders
+      headers: requestHeaders,
+      redirect: 'follow',
     });
     
     clearTimeout(timeout);
@@ -40,15 +42,15 @@ export const HlsController = factory.createHandlers(async (c) => {
       );
     }
 
-    const contentType =
-      upstream.headers
-        .get('content-type')
-        ?.split(';')[0]
-        ?.trim()
-        .toLowerCase() || 'application/vnd.apple.mpegurl';
+    const finalUrl = upstream.url || targetUrl.href;
+    let contentType = upstream.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
+    
+    const isM3u8 = finalUrl.includes('.m3u8') || 
+                   (contentType && /application\/vnd\.apple\.mpegurl|audio\/mpegurl/i.test(contentType));
 
-    const isPlaylist = /application\/vnd\.apple\.mpegurl|audio\/mpegurl/i.test(contentType) 
-                    || targetUrl.pathname.endsWith('.m3u8');
+    if (!contentType) {
+      contentType = isM3u8 ? 'application/vnd.apple.mpegurl' : 'video/mp2t';
+    }
 
     const headers = new Headers({
       'Content-Type': contentType,
@@ -58,19 +60,20 @@ export const HlsController = factory.createHandlers(async (c) => {
       'Vary': 'Origin, Range',
     });
 
-    const passthrough = [
-      'Cache-Control',
-      'Content-Range',
-      'Last-Modified',
-      'ETag'
-    ];
+    if (isM3u8) {
+      headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    } else {
+      const cacheControl = upstream.headers.get('Cache-Control');
+      if (cacheControl) headers.set('Cache-Control', cacheControl);
+    }
 
+    const passthrough = ['Content-Range', 'Last-Modified', 'ETag'];
     for (const key of passthrough) {
       const value = upstream.headers.get(key);
       if (value) headers.set(key, value);
     }
 
-    if (!isPlaylist) {
+    if (!isM3u8) {
       const contentEncoding = upstream.headers.get('Content-Encoding');
       const contentLength = upstream.headers.get('Content-Length');
       
@@ -79,7 +82,7 @@ export const HlsController = factory.createHandlers(async (c) => {
       }
     }
 
-    const stream = processResponseBody(upstream, contentType, targetUrl.href);
+    const stream = processResponseBody(upstream, contentType, finalUrl);
 
     return new Response(stream, {
       status: upstream.status as 200 | 206,
