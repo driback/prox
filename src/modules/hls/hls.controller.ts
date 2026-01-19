@@ -16,7 +16,8 @@ export const HlsController = factory.createHandlers(async (c) => {
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  // 30s timeout to prevent "Internal Server Error" on slow streams
+  const timeout = setTimeout(() => controller.abort(), 30_000);
 
   try {
     const requestHeaders = new Headers();
@@ -25,6 +26,8 @@ export const HlsController = factory.createHandlers(async (c) => {
     
     if (range) requestHeaders.set('Range', range);
     if (userAgent) requestHeaders.set('User-Agent', userAgent);
+    
+    // Crucial: Fixes streams that check for hotlinking
     requestHeaders.set('Referer', targetUrl.origin);
 
     const upstream = await fetch(targetUrl.href, { 
