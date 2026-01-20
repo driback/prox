@@ -15,51 +15,60 @@ export const HlsController = factory.createHandlers(async (c) => {
     return c.text('Invalid URL provided', 400);
   }
 
+  // 1. Setup AbortController for upstream timeouts
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
 
   try {
+    // 2. Prepare Headers
     const requestHeaders = new Headers();
     const range = c.req.header('range');
     const userAgent = c.req.header('user-agent');
     
+    // Forward Range requests (vital for seeking in segments)
     if (range) requestHeaders.set('Range', range);
-    if (userAgent) requestHeaders.set('User-Agent', userAgent);
+    // Forward UA or impersonate generic
+    requestHeaders.set('User-Agent', userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
+    // Set Referer to target origin to bypass basic hotlink protection
     requestHeaders.set('Referer', targetUrl.origin);
 
     const upstream = await fetch(targetUrl.href, { 
       signal: controller.signal,
       headers: requestHeaders,
-      redirect: 'follow',
+      redirect: 'follow', // Important: Follow redirects to find the actual file location
     });
     
     clearTimeout(timeout);
 
     if (!upstream.ok) {
       return c.text(
-        `Fetch failed: ${upstream.status} ${upstream.statusText}`,
+        `Upstream Error: ${upstream.status} ${upstream.statusText}`,
         upstream.status as ContentfulStatusCode
       );
     }
 
+    // 3. Handle Content Type & Redirects
     const finalUrl = upstream.url || targetUrl.href;
-    let contentType = upstream.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
+    const upstreamType = upstream.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
     
+    // Detect M3U8 strictly by extension OR Mime type
     const isM3u8 = finalUrl.includes('.m3u8') || 
-                   (contentType && /application\/vnd\.apple\.mpegurl|audio\/mpegurl/i.test(contentType));
+                   (upstreamType && /application\/vnd\.apple\.mpegurl|audio\/mpegurl/i.test(upstreamType));
 
-    if (!contentType) {
-      contentType = isM3u8 ? 'application/vnd.apple.mpegurl' : 'video/mp2t';
-    }
+    // Fallback content type if upstream is missing it
+    const contentType = upstreamType || (isM3u8 ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
 
+    // 4. Construct Response Headers
     const headers = new Headers({
       'Content-Type': contentType,
       'Access-Control-Allow-Origin': '*',
+      'Access-Control-Expose-Headers': 'Content-Length, Content-Range', // Help players read range info
       'Content-Disposition': 'inline',
       'Accept-Ranges': 'bytes',
       'Vary': 'Origin, Range',
     });
 
+    // Cache Control: M3U8 (live/dynamic) should not cache. Segments (static) should.
     if (isM3u8) {
       headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     } else {
@@ -67,21 +76,18 @@ export const HlsController = factory.createHandlers(async (c) => {
       if (cacheControl) headers.set('Cache-Control', cacheControl);
     }
 
-    const passthrough = ['Content-Range', 'Last-Modified', 'ETag'];
-    for (const key of passthrough) {
+    // Passthrough specific metadata
+    ['Content-Range', 'Last-Modified', 'ETag'].forEach(key => {
       const value = upstream.headers.get(key);
       if (value) headers.set(key, value);
-    }
+    });
 
-    if (!isM3u8) {
-      const contentEncoding = upstream.headers.get('Content-Encoding');
-      const contentLength = upstream.headers.get('Content-Length');
-      
-      if (contentLength && !contentEncoding) {
-        headers.set('Content-Length', contentLength);
-      }
-    }
+    // CRITICAL: Do NOT set 'Content-Length'.
+    // The fetch API might decompress the body (gzip), making the upstream Content-Length 
+    // invalid for the raw stream we are piping. Let the browser handle Chunked encoding.
 
+    // 5. Stream Processor
+    // If it's an M3U8, we intercept and rewrite. If it's a TS segment, we just pipe it.
     const stream = processResponseBody(upstream, contentType, finalUrl);
 
     return new Response(stream, {
@@ -91,12 +97,12 @@ export const HlsController = factory.createHandlers(async (c) => {
 
   } catch (err) {
     clearTimeout(timeout);
-    console.error('Media HLS Proxy Error:', err instanceof Error ? err.message : err);
+    console.error('HLS Proxy Error:', err);
 
     if (err instanceof DOMException && err.name === 'AbortError') {
       return c.text('Upstream timeout', 504);
     }
 
-    return c.text('Proxy Error', 502);
+    return c.text('Internal Proxy Error', 502);
   }
 });
