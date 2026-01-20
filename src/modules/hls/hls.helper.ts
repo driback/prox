@@ -2,19 +2,17 @@
 // Types
 // ==============================
 type UrlParts = {
-  origin: string;
-  pathname: string;
-  search: string;
-  baseUrl: string;
+  baseUrl: string; // The "folder" the m3u8 is in
+  search: string;  // The query params (?token=abc)
 };
 
 // ==============================
 // Constants & Regex
 // ==============================
 const MPEGURL_REGEX = /mpegurl/i;
-const GENERIC_URI_REGEX = /URI="([^"]+)"/;
+// Regex to capture URI="..." inside tags. Handles optional whitespace.
+const GENERIC_URI_REGEX = /URI\s*=\s*"([^"]+)"/g; 
 const REWRITE_PREFIX = "/hls?url=";
-// TEXT_ENCODER is stateless, so it's safe to keep global
 const TEXT_ENCODER = new TextEncoder();
 
 // ==============================
@@ -22,112 +20,99 @@ const TEXT_ENCODER = new TextEncoder();
 // ==============================
 const createEmptyStream = (): ReadableStream<Uint8Array> =>
   new ReadableStream({
-    start(controller) {
-      controller.close();
-    },
+    start(controller) { controller.close(); },
   });
 
-const isAbsoluteUrl = (url: string): boolean =>
-  /^https?:\/\//i.test(url) || url.startsWith("//");
+const isAbsoluteUrl = (url: string): boolean => 
+  /^(https?:)?\/\//i.test(url);
 
-// Added encodeURIComponent back for safety
-const createProxyUrl = (url: string): string =>
-  `${REWRITE_PREFIX}${encodeURIComponent(url)}`;
+const createProxyUrl = (target: string): string =>
+  `${REWRITE_PREFIX}${encodeURIComponent(target)}`;
 
-const resolveUrl = (urlStr: string, baseUrl: string): string => {
-  if (isAbsoluteUrl(urlStr)) {
-    return urlStr;
-  }
+const extractUrlParts = (finalUrl: string): UrlParts => {
   try {
-    return new URL(urlStr, baseUrl).href;
-  } catch (err) {
-    console.warn(`Failed to resolve URL: ${urlStr} against ${baseUrl}`, err);
-    return urlStr;
+    const url = new URL(finalUrl);
+    // Remove the filename (playlist.m3u8) to get the base directory
+    const pathname = url.pathname.substring(0, url.pathname.lastIndexOf("/") + 1);
+    return {
+      baseUrl: `${url.origin}${pathname}`,
+      search: url.search,
+    };
+  } catch (e) {
+    console.error("Failed to parse URL parts", e);
+    return { baseUrl: "", search: "" };
   }
-};
-
-const extractUrlParts = (targetUrl: string): UrlParts => {
-  const url = new URL(targetUrl);
-  const pathname = url.pathname.substring(0, url.pathname.lastIndexOf("/"));
-  const baseUrl = `${url.origin}${pathname}/`;
-
-  return {
-    origin: url.origin,
-    pathname,
-    search: url.search,
-    baseUrl,
-  };
 };
 
 /**
- * Merges segment params with base params.
- * Example: segment?v=1 + base?token=abc -> segment?v=1&token=abc
+ * Resolves a segment URL and merges original playlist query params (tokens).
  */
 const buildCompleteUrl = (
-  segment: string,
-  baseUrl: string,
-  baseSearch: string
+  lineUri: string,
+  parts: UrlParts
 ): string => {
-  const resolved = resolveUrl(segment, baseUrl);
-
-  if (!baseSearch) return resolved;
-
-  try {
-    const url = new URL(resolved);
-    // If we have base params, append them carefully
-    const baseParams = new URLSearchParams(baseSearch);
-
-    baseParams.forEach((value, key) => {
-      // Only append if the segment doesn't already have this key
-      if (!url.searchParams.has(key)) {
-        url.searchParams.append(key, value);
-      }
-    });
-
-    return url.href;
-  } catch {
-    return resolved;
+  // 1. Resolve absolute URL
+  let resolvedUrl: string;
+  if (isAbsoluteUrl(lineUri)) {
+    resolvedUrl = lineUri;
+  } else {
+    try {
+      resolvedUrl = new URL(lineUri, parts.baseUrl).href;
+    } catch {
+      return lineUri; // Fallback if resolution fails
+    }
   }
+
+  // 2. Append original query params (e.g. tokens) if they exist
+  // Only append if the segment doesn't already have them to avoid duplication
+  if (parts.search) {
+    try {
+      const urlObj = new URL(resolvedUrl);
+      const baseParams = new URLSearchParams(parts.search);
+      
+      baseParams.forEach((val, key) => {
+        if (!urlObj.searchParams.has(key)) {
+          urlObj.searchParams.set(key, val);
+        }
+      });
+      return urlObj.href;
+    } catch {
+      // If URL parsing fails, return the resolved one without extra params
+    }
+  }
+
+  return resolvedUrl;
 };
 
 // ==============================
 // Line Processor
 // ==============================
-const processLine = (line: string, urlParts: UrlParts): string => {
+const processLine = (line: string, parts: UrlParts): string => {
   const cleanLine = line.trim();
   if (!cleanLine) return line;
 
-  const { baseUrl, search } = urlParts;
-
-  // --- Case A: Directives / Tags (Starts with #) ---
+  // Case A: Tags with URIs (e.g., #EXT-X-KEY:...,URI="key.php")
   if (cleanLine.startsWith("#")) {
-    const isMedia = cleanLine.startsWith("#EXT-X-MEDIA:");
-    const isMap = cleanLine.startsWith("#EXT-X-MAP:");
-    const isKey = cleanLine.startsWith("#EXT-X-KEY:");
-
-    if (isMedia || isMap || isKey) {
+    // Only process tags we know contain URIs
+    if (cleanLine.startsWith("#EXT-X-MEDIA") || 
+        cleanLine.startsWith("#EXT-X-MAP") || 
+        cleanLine.startsWith("#EXT-X-KEY") ||
+        cleanLine.startsWith("#EXT-X-I-FRAME-STREAM-INF")) {
+      
       return cleanLine.replace(GENERIC_URI_REGEX, (match, uri) => {
-        try {
-          const resolved = buildCompleteUrl(uri, baseUrl, search);
-          return `URI="${createProxyUrl(resolved)}"`;
-        } catch (err) {
-          console.warn(`Failed to rewrite URI in tag: ${cleanLine}`, err);
-          return match;
-        }
+        const fullUrl = buildCompleteUrl(uri, parts);
+        return `URI="${createProxyUrl(fullUrl)}"`;
       });
     }
-
     return cleanLine;
   }
 
-  // --- Case B: Segment URIs (Everything else) ---
-  try {
-    const resolved = buildCompleteUrl(cleanLine, baseUrl, search);
-    return createProxyUrl(resolved);
-  } catch (err) {
-    console.warn("Failed to process segment:", cleanLine, err);
-    return cleanLine;
-  }
+  // Case B: Stream Inf (Quality Levels) - The next line is a URL
+  // We don't rewrite #EXT-X-STREAM-INF itself, we rewrite the NEXT line (the URL)
+  // This logic is handled because the next line will hit "Case C" below.
+
+  // Case C: Segment / Playlist URLs (Lines not starting with #)
+  return createProxyUrl(buildCompleteUrl(cleanLine, parts));
 };
 
 // ==============================
@@ -135,13 +120,12 @@ const processLine = (line: string, urlParts: UrlParts): string => {
 // ==============================
 const streamPlaylistRewrite = (
   stream: ReadableStream<Uint8Array>,
-  targetUrl: string
+  finalUrl: string
 ): ReadableStream<Uint8Array> => {
-  const urlParts = extractUrlParts(targetUrl);
+  const urlParts = extractUrlParts(finalUrl);
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      // Create a new TextDecoder for EACH request to avoid state corruption
       const decoder = new TextDecoder();
       const reader = stream.getReader();
       let buffer = "";
@@ -152,7 +136,11 @@ const streamPlaylistRewrite = (
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
+          // Split by newline, but carefully handle the last partial line
           const lines = buffer.split("\n");
+          
+          // The last element is either an empty string (if value ended in \n)
+          // or the start of the NEXT line. We save it back to buffer.
           buffer = lines.pop() ?? "";
 
           for (const line of lines) {
@@ -161,12 +149,13 @@ const streamPlaylistRewrite = (
           }
         }
 
+        // Process any remaining buffer
         if (buffer) {
           const processed = processLine(buffer, urlParts);
           controller.enqueue(TEXT_ENCODER.encode(processed));
         }
       } catch (err) {
-        console.error("Stream processing error:", err);
+        console.error("Stream Rewrite Error:", err);
         controller.error(err);
       } finally {
         controller.close();
@@ -181,16 +170,14 @@ const streamPlaylistRewrite = (
 export const processResponseBody = (
   response: Response,
   contentType: string,
-  targetUrl: string
+  finalUrl: string
 ): ReadableStream<Uint8Array> => {
+  // If it's not an M3U8 playlist, return the raw stream immediately
   if (!MPEGURL_REGEX.test(contentType)) {
     return response.body ?? createEmptyStream();
   }
 
-  if (!response.body) {
-    console.warn("No response body for HLS playlist");
-    return createEmptyStream();
-  }
+  if (!response.body) return createEmptyStream();
 
-  return streamPlaylistRewrite(response.body, targetUrl);
+  return streamPlaylistRewrite(response.body, finalUrl);
 };
