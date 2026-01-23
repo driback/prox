@@ -1,0 +1,15 @@
+# This file is required for deploying to Fastly Compute.
+manifest_version = 3
+name = "prox-fastly"
+description = "Hono app running on Fastly and Cloudflare"
+authors = ["you@example.com"]
+language = "javascript"
+
+[scripts]
+  # This command tells Fastly how to build your project
+  # We point it to the Fastly-specific entry point
+  build = "pnpm js-compute-runtime src/index.fastly.ts bin/main.wasm"
+
+# If you have an existing Fastly Service ID, put it here.
+# Otherwise, the CLI will prompt you to create one during 'fastly compute publish'.
+service_id = ""

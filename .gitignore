@@ -31,3 +31,10 @@ lerna-debug.log*
 
 # misc
 .DS_Store
+
+# Fastly specific
+bin/
+pkg/
+.fastly/
+viceroy.toml
+__input_bundled.js.map

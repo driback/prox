@@ -1,21 +1,27 @@
 {
-  "name": "proxy",
-  "scripts": {
-    "bump:deps": "pnpm update --latest -i",
-    "deploy": "wrangler deploy --minify",
-    "dev": "wrangler dev",
-    "format": "biome format --write .",
-    "lint": "biome lint",
-    "typecheck": "tsc --noEmit"
-  },
   "dependencies": {
-    "hono": "^4.7.11"
+    "@fastly/compute-js-context": "^0.5.5",
+    "@fastly/hono-fastly-compute": "^0.3.1",
+    "@fastly/js-compute": "^3.35.1",
+    "hono": "^4.11.5"
   },
   "devDependencies": {
-    "@biomejs/biome": "1.9.4",
-    "@cloudflare/workers-types": "^4.20250612.0",
-    "typescript": "^5.8.3",
-    "ultracite": "^4.2.10",
-    "wrangler": "4.20.0"
+    "@biomejs/biome": "2.3.11",
+    "@cloudflare/workers-types": "^4.20260123.0",
+    "typescript": "^5.9.3",
+    "ultracite": "^7.0.12",
+    "wrangler": "4.60.0"
+  },
+  "name": "proxy",
+  "scripts": {
+    "build:fastly": "js-compute-runtime src/index.fastly.ts bin/main.wasm",
+    "bump:deps": "pnpm update --latest -i",
+    "deploy:cloudflare": "wrangler deploy src/index.cloudflare.ts",
+    "deploy:fastly": "pnpm run build:fastly && fastly compute publish",
+    "dev:cloudflare": "wrangler dev src/index.cloudflare.ts",
+    "format": "biome format --write .",
+    "lint": "biome lint",
+    "start:fastly": "fastly compute serve",
+    "typecheck": "tsc --noEmit"
   }
 }

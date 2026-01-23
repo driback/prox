@@ -3,7 +3,7 @@ import { cors } from 'hono/cors';
 import { HlsController } from './modules/hls/hls.controller';
 import { MediaController } from './modules/media/media.controller';
 
-const app = new Hono();
+export const app = new Hono();
 
 app.use(
   '*',
@@ -22,4 +22,3 @@ app.options('/', (c) => {
   return c.body(null, 204);
 });
 
-export default app;
