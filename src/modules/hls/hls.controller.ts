@@ -58,17 +58,17 @@ export const HlsController = factory.createHandlers(async (c) => {
     // Fallback content type if upstream is missing it
     const contentType = upstreamType || (isM3u8 ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
 
-    // 4. Construct Response Headers
+// 4. Construct Response Headers
     const headers = new Headers({
       'Content-Type': contentType,
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Expose-Headers': 'Content-Length, Content-Range', // Help players read range info
+      'Access-Control-Expose-Headers': 'Content-Length, Content-Range',
       'Content-Disposition': 'inline',
-      'Accept-Ranges': 'bytes',
+      'Accept-Ranges': 'bytes', // Mandatory for seeking
       'Vary': 'Origin, Range',
     });
 
-    // Cache Control: M3U8 (live/dynamic) should not cache. Segments (static) should.
+    // Cache Control
     if (isM3u8) {
       headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     } else {
@@ -82,19 +82,31 @@ export const HlsController = factory.createHandlers(async (c) => {
       if (value) headers.set(key, value);
     });
 
-    // CRITICAL: Do NOT set 'Content-Length'.
-    // The fetch API might decompress the body (gzip), making the upstream Content-Length 
-    // invalid for the raw stream we are piping. Let the browser handle Chunked encoding.
+    // --- FIX STARTS HERE ---
+    
+    // We strictly need Content-Length for segments (TS/MP4) to allow seeking.
+    // Video segments are rarely gzipped by upstream (they are already compressed binaries).
+    // If the upstream DID gzip it, fetch() decompressed it, so upstream Content-Length is invalid.
+    
+    const upstreamEncoding = upstream.headers.get('Content-Encoding');
+    const upstreamLen = upstream.headers.get('Content-Length');
+    
+    // 1. If it is an M3U8, we are rewriting it, so size changes. Don't set Length.
+    // 2. If Upstream is encoded (gzip/br), length doesn't match raw stream. Don't set Length.
+    // 3. Otherwise (Standard Video Segment), FORWARD the Length.
+    if (!isM3u8 && upstreamLen && !upstreamEncoding) {
+      headers.set('Content-Length', upstreamLen);
+    }
+    
+    // --- FIX ENDS HERE ---
 
     // 5. Stream Processor
-    // If it's an M3U8, we intercept and rewrite. If it's a TS segment, we just pipe it.
     const stream = processResponseBody(upstream, contentType, finalUrl);
 
     return new Response(stream, {
       status: upstream.status as 200 | 206,
       headers,
     });
-
   } catch (err) {
     clearTimeout(timeout);
     console.error('HLS Proxy Error:', err);
