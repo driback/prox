@@ -44,7 +44,7 @@ export const HlsController = factory.createHandlers(async (c) => {
 
     const finalUrl = upstream.url || targetUrl.href;
     const upstreamType = upstream.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
-
+    
     const isM3u8 = finalUrl.includes('.m3u8') || 
                    (upstreamType && /application\/vnd\.apple\.mpegurl|audio\/mpegurl/i.test(upstreamType));
 

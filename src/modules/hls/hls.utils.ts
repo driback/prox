@@ -7,18 +7,18 @@ const MPEGURL_REGEX = /mpegurl|m3u8/i;
 const GENERIC_URI_REGEX = /URI\s*=\s*"([^"]+)"/g; 
 const REWRITE_PREFIX = "/hls?url=";
 
-const createEmptyStream = (): ReadableStream<Uint8Array> =>
+export const createEmptyStream = (): ReadableStream<Uint8Array> =>
   new ReadableStream({
     start(controller) { controller.close(); },
   });
 
-const isAbsoluteUrl = (url: string): boolean => 
-  /^(https?:)?\/\//i.test(url);
+export const isAbsoluteUrl = (url: string): boolean => 
+  url.startsWith('https://') || url.startsWith('http://');
 
-const createProxyUrl = (target: string): string =>
+export const createProxyUrl = (target: string): string =>
   `${REWRITE_PREFIX}${encodeURIComponent(target)}`;
 
-const extractUrlParts = (finalUrl: string): UrlParts => {
+export const extractUrlParts = (finalUrl: string): UrlParts => {
   try {
     const url = new URL(finalUrl);
     const pathname = url.pathname.substring(0, url.pathname.lastIndexOf("/") + 1);
@@ -31,51 +31,53 @@ const extractUrlParts = (finalUrl: string): UrlParts => {
   }
 };
 
-const buildCompleteUrl = (lineUri: string, parts: UrlParts): string => {
+export const buildCompleteUrl = (lineUri: string, parts: UrlParts): string => {
   let resolvedUrl: string;
   
-  if (isAbsoluteUrl(lineUri)) {
+  const isAbsolute = lineUri.startsWith('h') && (lineUri.startsWith('https://') || lineUri.startsWith('http://'));
+  
+  if (isAbsolute) {
     resolvedUrl = lineUri;
   } else {
-    try {
-      resolvedUrl = new URL(lineUri, parts.baseUrl).href;
-    } catch {
-      return lineUri;
+    const firstChar = lineUri.charCodeAt(0);
+    
+    if (firstChar === 47 || firstChar === 46) {
+        try {
+            resolvedUrl = new URL(lineUri, parts.baseUrl).href;
+        } catch {
+            resolvedUrl = lineUri;
+        }
+    } else {
+        resolvedUrl = parts.baseUrl + lineUri;
     }
   }
 
   if (parts.search) {
-    try {
-      const urlObj = new URL(resolvedUrl);
-      const baseParams = new URLSearchParams(parts.search);
-      baseParams.forEach((val, key) => {
-        if (!urlObj.searchParams.has(key)) {
-          urlObj.searchParams.set(key, val);
-        }
-      });
-      return urlObj.href;
-    } catch {}
+    const tokenClean = parts.search.substring(1); 
+    if (!resolvedUrl.includes(tokenClean)) {
+      const separator = resolvedUrl.includes('?') ? '&' : '?';
+      resolvedUrl += separator + tokenClean;
+    }
   }
 
   return resolvedUrl;
 };
 
 const processLine = (line: string, parts: UrlParts): string => {
+  if (!line) return line;
+
   const cleanLine = line.trim();
   if (!cleanLine) return line;
 
-  if (cleanLine.startsWith("#")) {
-    if (cleanLine.startsWith("#EXT-X-MEDIA") || 
-        cleanLine.startsWith("#EXT-X-MAP") || 
-        cleanLine.startsWith("#EXT-X-KEY") ||
-        cleanLine.startsWith("#EXT-X-I-FRAME-STREAM-INF")) {
-      
-      return cleanLine.replace(GENERIC_URI_REGEX, (_, uri) => {
-        const fullUrl = buildCompleteUrl(uri, parts);
-        return `URI="${createProxyUrl(fullUrl)}"`;
-      });
+  if (cleanLine.charCodeAt(0) === 35) {
+    if (!cleanLine.includes('URI=')) {
+        return cleanLine;
     }
-    return cleanLine;
+
+    return cleanLine.replace(GENERIC_URI_REGEX, (_, uri) => {
+      const fullUrl = buildCompleteUrl(uri, parts);
+      return `URI="${createProxyUrl(fullUrl)}"`;
+    });
   }
 
   return createProxyUrl(buildCompleteUrl(cleanLine, parts));
@@ -89,12 +91,16 @@ const createHlsTransformer = (parts: UrlParts) => {
   return new TransformStream({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
+      
+      let boundary = buffer.indexOf('\n');
+      while (boundary !== -1) {
+        const line = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 1);
+        
         const processed = processLine(line, parts);
         controller.enqueue(encoder.encode(processed + '\n'));
+        
+        boundary = buffer.indexOf('\n');
       }
     },
     flush(controller) {
@@ -119,7 +125,7 @@ export const processResponseBody = (
   }
 
   const contentLength = response.headers.get('Content-Length');
-  if (contentLength && parseInt(contentLength) > 1024 * 1024 * 2) {
+  if (contentLength && parseInt(contentLength) > 1024 * 1024 * 10) {
     return stream;
   }
 
